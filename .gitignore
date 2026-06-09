@@ -1,0 +1,20 @@
+# 매장 데이터
+photos/
+*.jpg
+*.jpeg
+*.png
+!assets/*.png
+
+# 빌드 결과물
+dist/
+build/
+*.spec
+launcher_dist/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 설정
+.camera_printer.json
