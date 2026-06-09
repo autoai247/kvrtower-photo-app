@@ -19,7 +19,7 @@ from pathlib import Path
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  설정 — 서버 URL만 채우면 됨 (토큰은 서버가 보관)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SERVER_URL = "https://kvrtower-photo-launcher.up.railway.app"
+SERVER_URL = "https://web-production-36aac.up.railway.app"
 # 매장 식별용 (선택, 통계·접근제어 용도)
 STORE_ID = "nseoultower"
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
