@@ -1403,6 +1403,7 @@ class App:
         self._last_greet_time = 0.0    # 마지막 인사 시각 (반복 인사 방지)
         self._last_lead_in_time = 0.0  # 마지막 호객 음성 시각
         self._lead_in_active = False   # 호객 단계 표시 플래그
+        self._prev_motion_gray = None  # 움직임 감지용 이전 프레임 (다운샘플 grayscale)
         # TTS 백그라운드 워밍업 — 첫 음성 호출 시 지연 0
         threading.Thread(target=_ensure_tts_proc, daemon=True).start()
         self._build_ui()
@@ -2080,6 +2081,24 @@ class App:
             self._lead_in_active = False
             return
 
+        # ─── 움직임 감지 (호객 음성 트리거) ───
+        # 다운샘플(160×90) gray + 이전 프레임 비교 → 변화 픽셀 비율
+        motion_detected = False
+        try:
+            small = cv2.resize(frame, (160, 90))
+            mgray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            mgray = cv2.GaussianBlur(mgray, (5, 5), 0)
+            if (self._prev_motion_gray is not None
+                    and self._prev_motion_gray.shape == mgray.shape):
+                delta = cv2.absdiff(self._prev_motion_gray, mgray)
+                _, thresh = cv2.threshold(delta, 25, 255, cv2.THRESH_BINARY)
+                pixels = int(cv2.countNonZero(thresh))
+                # 화면의 1.5% 이상 변화 = 사람 움직임으로 간주
+                motion_detected = pixels > int(mgray.size * 0.015)
+            self._prev_motion_gray = mgray
+        except Exception as e:
+            log.debug("움직임 감지 실패: %s", e)
+
         # ─── 모든 얼굴 검출 (튜플 7번째 = score) ───
         rgb = None
         try:
@@ -2176,11 +2195,13 @@ class App:
 
         face_ok = chosen is not None
 
-        # ─── 호객 단계 — 사람은 있는데 아직 인쇄 단계 진입 못 함 ───
-        if anyone_present and not face_ok and self._auto_countdown_start == 0:
+        # ─── 호객 단계 ───
+        # 화면 표시: 사람(얼굴) 또는 움직임 감지되면 호객 화면
+        # 음성 호객: 움직임 감지되었을 때만 (정적인 사진/포스터 무시)
+        any_signal = anyone_present or motion_detected
+        if any_signal and not face_ok and self._auto_countdown_start == 0:
             self._lead_in_active = True
-            # 호객 음성 — 20초 쿨다운 (반복 X)
-            if time.time() - self._last_lead_in_time > 20:
+            if motion_detected and time.time() - self._last_lead_in_time > 20:
                 self._last_lead_in_time = time.time()
                 speak(
                     "Hey! Free K-POP photo — step in front of the camera!",
