@@ -1381,8 +1381,15 @@ class App:
 
     def _build_ui(self):
         self.root.title(APP_TITLE)
-        self.root.geometry("1080x1020")
         self.root.configure(bg="#111")
+        # 시작 시 화면 사이즈에 맞춰 즉시 최대화
+        try:
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
+            self.root.geometry(f"{sw}x{sh}+0+0")
+            self.root.state("zoomed")
+        except Exception:
+            self.root.geometry("1280x960")
 
         style = ttk.Style()
         try:
