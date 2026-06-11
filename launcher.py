@@ -107,6 +107,60 @@ def install_requirements_if_changed():
         log(f"  ⚠  pip install 실패: {e}")
 
 
+def ensure_desktop_shortcut():
+    """첫 실행 시 바탕화면에 아이콘 바로가기 생성. 이미 있으면 skip.
+
+    매장 직원이 launcher.py 위치 모르게 — 바탕화면 아이콘 하나만 더블클릭하면
+    실행되도록.
+    """
+    if os.name != "nt":
+        return
+    try:
+        desktop = (Path(os.environ.get("USERPROFILE", str(Path.home())))
+                   / "Desktop")
+        if not desktop.exists():
+            desktop = (Path(os.environ.get("PUBLIC", "C:\\Users\\Public"))
+                       / "Desktop")
+        link_path = desktop / "K-Culture VR Tower 사진프린터.lnk"
+        if link_path.exists():
+            return
+
+        # 아이콘 캐시 (없으면 서버에서 받음)
+        icon_path = CACHE_DIR / "kvrtower.ico"
+        if not icon_path.exists():
+            try:
+                data = http_get(
+                    f"{SERVER_URL}/file/assets/kvrtower.ico"
+                    f"?store={STORE_ID}",
+                    timeout=20)
+                icon_path.write_bytes(data)
+            except Exception:
+                icon_path = None
+
+        launcher_path = Path(sys.argv[0]).resolve()
+        # 콘솔창 안 뜨도록 pythonw.exe 우선
+        py_exe = sys.executable
+        pyw = Path(py_exe).with_name("pythonw.exe")
+        target_exe = str(pyw) if pyw.exists() else py_exe
+
+        icon_part = (f"; $lnk.IconLocation='{icon_path}'"
+                     if icon_path else "")
+        ps_cmd = (
+            f"$s=New-Object -ComObject WScript.Shell; "
+            f"$lnk=$s.CreateShortcut('{link_path}'); "
+            f"$lnk.TargetPath='{target_exe}'; "
+            f"$lnk.Arguments='\"{launcher_path}\"'; "
+            f"$lnk.WorkingDirectory='{launcher_path.parent}'"
+            f"{icon_part}; "
+            f"$lnk.Save()"
+        )
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd],
+                       check=False, capture_output=True, timeout=15)
+        log(f"  ✓ 바탕화면 바로가기 생성: {link_path.name}")
+    except Exception as e:
+        log(f"  ⚠ 바로가기 생성 실패: {e}")
+
+
 def run_main():
     main_py = CACHE_DIR / "src" / "main.py"
     if not main_py.exists():
@@ -136,6 +190,7 @@ def main():
     except Exception as e:
         log(f"  ⚠  서버 통신 실패: {e}")
         log(f"     마지막 캐시본으로 실행합니다.")
+    ensure_desktop_shortcut()
     return run_main()
 
 
