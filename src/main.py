@@ -275,10 +275,11 @@ def _get_face_detector():
         try:
             import mediapipe as mp
             # model_selection=1 = 5m 이내 얼굴 검출 (TV 카메라 매장 거리 대응)
-            # min_detection_confidence 0.55 = 정면 얼굴 위주 (지나가는 사람 무시)
+            # 임계 0.3 — 약한 검출(멀리/측면) 까지 받아 호객 단계 트리거.
+            # 인쇄 단계는 코드에서 score >= 0.6 + 위치/크기 필터로 별도 컷.
             _FACE_DETECTOR = mp.solutions.face_detection.FaceDetection(
                 model_selection=1,
-                min_detection_confidence=0.55,
+                min_detection_confidence=0.3,
             )
             log.info("Face Detection 로드 완료")
         except Exception as e:
@@ -317,8 +318,8 @@ def _detect_face_box(rgb_image):
 
 
 def _detect_faces_all(rgb_image):
-    """모든 얼굴 (cx, cy, w, h, img_w, img_h) 리스트 — 면적 큰 순.
-    자동 인쇄 락온(lock-on) 로직용.
+    """모든 얼굴 (cx, cy, w, h, img_w, img_h, score) 리스트 — 면적 큰 순.
+    자동 인쇄 락온 + 호객/인쇄 단계 분기용. score 는 0~1.
     """
     det = _get_face_detector()
     if det is None:
@@ -332,8 +333,9 @@ def _detect_faces_all(rgb_image):
         for d in results.detections:
             bb = d.location_data.relative_bounding_box
             bw, bh = bb.width * w, bb.height * h
+            score = float(d.score[0]) if d.score else 0.5
             faces.append((bb.xmin * w + bw / 2, bb.ymin * h + bh / 2,
-                          bw, bh, w, h))
+                          bw, bh, w, h, score))
         faces.sort(key=lambda f: f[2] * f[3], reverse=True)
         return faces
     except Exception as e:
@@ -1399,6 +1401,8 @@ class App:
         self._auto_no_face_count = 0   # 카운트다운 중 얼굴 사라짐 카운터
         self._locked_face = None       # 카운트다운 락온: (cx, cy, w, h) 또는 None
         self._last_greet_time = 0.0    # 마지막 인사 시각 (반복 인사 방지)
+        self._last_lead_in_time = 0.0  # 마지막 호객 음성 시각
+        self._lead_in_active = False   # 호객 단계 표시 플래그
         # TTS 백그라운드 워밍업 — 첫 음성 호출 시 지연 0
         threading.Thread(target=_ensure_tts_proc, daemon=True).start()
         self._build_ui()
@@ -1909,6 +1913,25 @@ class App:
             d.text((right_cx - tw_kr // 2, y), t_kr, fill="#aaa", font=f_kr)
             return
 
+        # 2.5) 호객 단계 — 사람은 보이는데 아직 인쇄 단계 아님
+        if (self.var_auto.get() and self._lead_in_active
+                and self._auto_face_frames == 0):
+            t1 = "STEP IN"
+            t2 = "카메라 앞으로 와주세요"
+            t3 = "FREE  ·  무료"
+            f1, tw1 = fit_big(t1, big_max_w, int(usable_h * 0.32))
+            f2, tw2 = fit_big(t2, med_max_w, int(usable_h * 0.15))
+            f3, tw3 = fit_big(t3, med_max_w, int(usable_h * 0.13))
+            gap = 26
+            total = f1.size + gap + f2.size + gap + f3.size
+            y = top_pad + (usable_h - total) // 2
+            d.text((right_cx - tw1 // 2, y), t1, fill="white", font=f1)
+            y += f1.size + gap
+            d.text((right_cx - tw2 // 2, y), t2, fill="#7BA6DD", font=f2)
+            y += f2.size + gap
+            d.text((right_cx - tw3 // 2, y), t3, fill="#4040C8", font=f3)
+            return
+
         # 3) 얼굴 감지 중 (자동 모드) — 게이지 바 시각화
         if self.var_auto.get() and self._auto_face_frames > 0:
             t1 = "STAY STILL"
@@ -2044,6 +2067,7 @@ class App:
             self._auto_face_frames = 0
             self._auto_countdown = 0
             self._locked_face = None
+            self._lead_in_active = False
             return
 
         # 쿨다운 (인쇄 후 10초 동안은 새 자동 트리거 안 받음)
@@ -2053,9 +2077,10 @@ class App:
             self._auto_last_countdown_speak = -1
             self._auto_no_face_count = 0
             self._locked_face = None
+            self._lead_in_active = False
             return
 
-        # ─── 모든 얼굴 검출 (락온 비교용) ───
+        # ─── 모든 얼굴 검출 (튜플 7번째 = score) ───
         rgb = None
         try:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -2064,7 +2089,7 @@ class App:
 
         all_faces = _detect_faces_all(rgb) if rgb is not None else []
 
-        # Fallback: Detection 실패 시 Mesh → Haar (단일 얼굴)
+        # Fallback: Detection 실패 시 Mesh → Haar (단일 얼굴, score=0.7 추정)
         if not all_faces and rgb is not None:
             try:
                 parts = _detect_face_parts(rgb)
@@ -2078,7 +2103,7 @@ class App:
                             (int(ys.min()) + int(ys.max())) / 2,
                             int(xs.max()) - int(xs.min()),
                             int(ys.max()) - int(ys.min()),
-                            img_w, img_h,
+                            img_w, img_h, 0.7,
                         )]
             except Exception:
                 pass
@@ -2096,57 +2121,73 @@ class App:
                     if len(faces) > 0:
                         ih, iw = gray.shape
                         all_faces = sorted(
-                            [(x + w/2, y + h/2, w, h, iw, ih)
+                            [(x + w/2, y + h/2, w, h, iw, ih, 0.7)
                              for (x, y, w, h) in faces],
                             key=lambda f: f[2] * f[3], reverse=True,
                         )
             except Exception:
                 pass
 
-        # ─── 위치/크기 필터로 유효 얼굴만 남김 ───
-        # 1) 얼굴 폭 5% 이상 (뮤직비디오 작은 얼굴 제외)
-        # 2) 화면 좌우 50% 이내 (가운데)
-        # 3) 화면 상단 5% ~ 65% 사이 (바닥조명·바닥 노이즈 무시)
-        valid_faces = []
+        # ─── 단계 1: 호객 후보 — 약한 검출이라도 화면 안에 있으면 사람 있음 ───
+        anyone_present = len(all_faces) > 0
+
+        # ─── 단계 2: 인쇄 가능 후보 — 강한 검출(score >= 0.6) + 위치/크기 통과 ───
+        #     1) score >= 0.6 (확실한 정면 얼굴)
+        #     2) 얼굴 폭 6% 이상 (충분히 가까이)
+        #     3) 화면 좌우 50% 이내
+        #     4) 화면 상단 5% ~ 65% (바닥조명·바닥 노이즈 무시)
+        strong_faces = []
         for f in all_faces:
-            fcx, fcy, fw, fh, iw, ih = f
+            fcx, fcy, fw, fh, iw, ih, score = f
+            if score < 0.6:
+                continue
             face_ratio = fw / iw
             fcy_ratio = fcy / ih
-            if (face_ratio >= 0.05 and
+            if (face_ratio >= 0.06 and
                     abs(fcx - iw / 2) < iw * 0.50 and
                     0.05 < fcy_ratio < 0.65):
-                valid_faces.append(f)
+                strong_faces.append(f)
 
         # ─── 락온 모드: 카운트다운 진행 중이면 락 위치 근처 얼굴만 선택 ───
         chosen = None
-        if self._locked_face is not None and valid_faces:
+        if self._locked_face is not None and strong_faces:
             lcx, lcy, lw, lh = self._locked_face
-            iw_ref = valid_faces[0][4]
+            iw_ref = strong_faces[0][4]
             best = None
             best_dist = float("inf")
-            for f in valid_faces:
-                fcx, fcy, fw, fh, _, _ = f
+            for f in strong_faces:
+                fcx, fcy, fw, fh, _, _, _ = f
                 dist = ((fcx - lcx) ** 2 + (fcy - lcy) ** 2) ** 0.5
-                # 락 위치에서 화면 가로 30% 이내 + 크기 50% 이상 유사
                 size_ratio = min(fw, lw) / max(fw, lw)
                 if dist < iw_ref * 0.30 and size_ratio > 0.5 and dist < best_dist:
                     best_dist = dist
                     best = f
             if best is not None:
                 chosen = best
-                # 락 위치 천천히 따라감 (EMA) — 약간의 움직임 허용
-                fcx, fcy, fw, fh, _, _ = best
+                fcx, fcy, fw, fh, _, _, _ = best
                 self._locked_face = (
                     lcx * 0.7 + fcx * 0.3,
                     lcy * 0.7 + fcy * 0.3,
                     lw * 0.7 + fw * 0.3,
                     lh * 0.7 + fh * 0.3,
                 )
-        elif valid_faces:
-            # 락 없음 (카운트다운 시작 전) — 가장 큰 얼굴
-            chosen = valid_faces[0]
+        elif strong_faces:
+            chosen = strong_faces[0]
 
         face_ok = chosen is not None
+
+        # ─── 호객 단계 — 사람은 있는데 아직 인쇄 단계 진입 못 함 ───
+        if anyone_present and not face_ok and self._auto_countdown_start == 0:
+            self._lead_in_active = True
+            # 호객 음성 — 20초 쿨다운 (반복 X)
+            if time.time() - self._last_lead_in_time > 20:
+                self._last_lead_in_time = time.time()
+                speak(
+                    "Hey! Free K-POP photo — step in front of the camera!",
+                    "이리 오세요! 무료 K팝 사진! 카메라 앞에 서주세요!",
+                )
+        else:
+            self._lead_in_active = False
 
         # ─── 카운트다운 진행 중 ───
         if self._auto_countdown_start > 0:
@@ -2207,7 +2248,7 @@ class App:
                 self._auto_last_countdown_speak = -1
                 self._auto_no_face_count = 0
                 # ★ 락온! — 이 얼굴 위치 잠금
-                fcx, fcy, fw, fh, _, _ = chosen
+                fcx, fcy, fw, fh, _, _, _ = chosen
                 self._locked_face = (fcx, fcy, fw, fh)
                 log.info("얼굴 안정 → 카운트다운 시작 (락온 위치 %d,%d)",
                          int(fcx), int(fcy))
