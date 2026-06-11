@@ -2,19 +2,27 @@
 
 매장 PC는 이 파일(또는 빌드된 KVRTowerPhoto.exe) 하나만 실행하면 됩니다.
 실행 시:
-  1. 우리 서버(Railway)에서 최신 코드 메타데이터 받음
-  2. 변경된 파일만 다운로드
-  3. 의존성 자동 설치 (변경 시)
-  4. main.py 실행
+  1. 자기 자신(launcher) 새 버전 있으면 자동 갱신 (다음 실행부터 적용)
+  2. 서버(Railway)에서 최신 앱 코드 메타데이터 받음
+  3. 변경된 파일만 다운로드
+  4. 의존성 자동 설치 (변경 시)
+  5. main.py 실행
 인터넷 안 되면 마지막 캐시본으로 실행.
 """
 import os
 import sys
 import json
 import hashlib
+import shutil
 import subprocess
 import urllib.request
 from pathlib import Path
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  버전 — push 할 때마다 +1
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+LAUNCHER_VERSION = "2026.06.11.1"
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  설정 — 서버 URL만 채우면 됨 (토큰은 서버가 보관)
@@ -107,6 +115,47 @@ def install_requirements_if_changed():
         log(f"  ⚠  pip install 실패: {e}")
 
 
+def apply_pending_self_update():
+    """이전 실행에서 받아둔 새 launcher 가 있으면 자기 자신 교체.
+    .py 파일일 때만 작동 (EXE 는 사용 중 잠금 때문에 별도 처리).
+    """
+    try:
+        my_path = Path(sys.argv[0]).resolve()
+        if my_path.suffix.lower() != ".py":
+            return
+        pending = my_path.with_suffix(".py.new")
+        if not pending.exists():
+            return
+        # 백업 → 교체
+        backup = my_path.with_suffix(".py.bak")
+        shutil.copy2(my_path, backup)
+        shutil.move(str(pending), str(my_path))
+        log(f"  ✓ launcher 자체 업데이트 적용 완료")
+    except Exception as e:
+        log(f"  ⚠ launcher 적용 실패: {e}")
+
+
+def self_update_check():
+    """manifest 의 launcher.py sha 와 자기 자신 sha 비교.
+    다르면 새 launcher.py 받아서 옆에 .new 로 저장 (다음 실행 시 적용).
+    """
+    try:
+        my_path = Path(sys.argv[0]).resolve()
+        if my_path.suffix.lower() != ".py":
+            return  # EXE 는 별도
+        my_sha = file_sha(my_path)
+        # 서버에서 새 launcher.py 받아 sha 비교
+        new_bytes = http_get(f"{SERVER_URL}/launcher.py", timeout=15)
+        new_sha = hashlib.sha1(new_bytes).hexdigest()
+        if my_sha == new_sha:
+            return
+        pending = my_path.with_suffix(".py.new")
+        pending.write_bytes(new_bytes)
+        log(f"  ★ launcher 새 버전 다운로드 — 다음 실행부터 적용")
+    except Exception as e:
+        log(f"  ⚠ launcher 자체 업데이트 확인 실패: {e}")
+
+
 def ensure_desktop_shortcut():
     """첫 실행 시 바탕화면에 아이콘 바로가기 생성. 이미 있으면 skip.
 
@@ -180,13 +229,18 @@ def run_main():
 
 def main():
     log("")
-    log("  K-CULTURE VR TOWER · PHOTO PRINTER")
-    log("  서버: " + SERVER_URL)
+    log("  ============================================================")
+    log("    K-CULTURE VR TOWER · PHOTO PRINTER")
+    log(f"    Launcher v{LAUNCHER_VERSION}")
+    log(f"    서버: {SERVER_URL}")
+    log("  ============================================================")
     log("")
+    apply_pending_self_update()
     try:
         manifest = get_manifest()
         update_all(manifest)
         install_requirements_if_changed()
+        self_update_check()
     except Exception as e:
         log(f"  ⚠  서버 통신 실패: {e}")
         log(f"     마지막 캐시본으로 실행합니다.")
