@@ -275,10 +275,10 @@ def _get_face_detector():
         try:
             import mediapipe as mp
             # model_selection=1 = 5m 이내 얼굴 검출 (TV 카메라 매장 거리 대응)
-            # min_detection_confidence 0.3 = 부분 가림/측면 얼굴도 잡음
+            # min_detection_confidence 0.55 = 정면 얼굴 위주 (지나가는 사람 무시)
             _FACE_DETECTOR = mp.solutions.face_detection.FaceDetection(
                 model_selection=1,
-                min_detection_confidence=0.3,
+                min_detection_confidence=0.55,
             )
             log.info("Face Detection 로드 완료")
         except Exception as e:
@@ -1398,6 +1398,7 @@ class App:
         self._auto_last_countdown_speak = -1
         self._auto_no_face_count = 0   # 카운트다운 중 얼굴 사라짐 카운터
         self._locked_face = None       # 카운트다운 락온: (cx, cy, w, h) 또는 None
+        self._last_greet_time = 0.0    # 마지막 인사 시각 (반복 인사 방지)
         # TTS 백그라운드 워밍업 — 첫 음성 호출 시 지연 0
         threading.Thread(target=_ensure_tts_proc, daemon=True).start()
         self._build_ui()
@@ -1908,25 +1909,52 @@ class App:
             d.text((right_cx - tw_kr // 2, y), t_kr, fill="#aaa", font=f_kr)
             return
 
-        # 3) 얼굴 감지 중 (자동 모드)
+        # 3) 얼굴 감지 중 (자동 모드) — 게이지 바 시각화
         if self.var_auto.get() and self._auto_face_frames > 0:
             t1 = "STAY STILL"
             t2 = "그대로 있어주세요"
             pct = int(min(100, self._auto_face_frames / 8 * 100))
-            t3 = f"Almost ready…  {pct}%"
+            t3 = f"{pct}%"
 
-            f1, tw1 = fit_big(t1, big_max_w, int(usable_h * 0.3))
-            f2, tw2 = fit_big(t2, med_max_w, int(usable_h * 0.15))
-            f3, tw3 = fit_big(t3, med_max_w, int(usable_h * 0.08))
+            f1, tw1 = fit_big(t1, big_max_w, int(usable_h * 0.28))
+            f2, tw2 = fit_big(t2, med_max_w, int(usable_h * 0.14))
+            f3, tw3 = fit_big(t3, med_max_w, int(usable_h * 0.10))
 
             gap = 22
-            total = f1.size + gap + f2.size + gap + f3.size
+            bar_h = max(18, int(usable_h * 0.05))
+            bar_w = right_w - 60
+            total = f1.size + gap + f2.size + gap + bar_h + 14 + f3.size
             y = top_pad + (usable_h - total) // 2
+
             d.text((right_cx - tw1 // 2, y), t1, fill="#7BA6DD", font=f1)
             y += f1.size + gap
             d.text((right_cx - tw2 // 2, y), t2, fill="white", font=f2)
             y += f2.size + gap
-            d.text((right_cx - tw3 // 2, y), t3, fill="#888", font=f3)
+
+            # 게이지 바 — 둥근 배경 + 채워지는 파스텔 블루
+            bar_x = right_cx - bar_w // 2
+            radius = bar_h // 2
+            try:
+                d.rounded_rectangle(
+                    (bar_x, y, bar_x + bar_w, y + bar_h),
+                    radius=radius, fill="#2a2a2a", outline="#444", width=2,
+                )
+                fill_w = int(bar_w * pct / 100)
+                if fill_w > radius * 2:
+                    d.rounded_rectangle(
+                        (bar_x, y, bar_x + fill_w, y + bar_h),
+                        radius=radius, fill="#7BA6DD",
+                    )
+            except Exception:
+                # rounded_rectangle 없는 Pillow 구버전 폴백
+                d.rectangle(
+                    (bar_x, y, bar_x + bar_w, y + bar_h), fill="#2a2a2a")
+                fill_w = int(bar_w * pct / 100)
+                d.rectangle(
+                    (bar_x, y, bar_x + fill_w, y + bar_h), fill="#7BA6DD")
+            y += bar_h + 14
+
+            d.text((right_cx - tw3 // 2, y), t3, fill="white", font=f3)
             return
 
         # 4) 기본 안내 (영어 크게 / 한글 작게) — 무료 강조
@@ -2168,9 +2196,11 @@ class App:
         if face_ok:
             prev = self._auto_face_frames
             self._auto_face_frames += 1
-            if prev == 0:
+            # 첫 인식 인사 — 30초 쿨다운 (반복 인사 방지)
+            if prev == 0 and time.time() - self._last_greet_time > 30:
                 speak("Yay! Free K-POP photo just for you!",
                       "와! K팝 무료 사진 찍어드릴게요!")
+                self._last_greet_time = time.time()
             if self._auto_face_frames >= 8 and self._auto_countdown_start == 0:
                 self._auto_countdown_start = time.time()
                 self._auto_countdown = 3
@@ -2182,7 +2212,8 @@ class App:
                 log.info("얼굴 안정 → 카운트다운 시작 (락온 위치 %d,%d)",
                          int(fcx), int(fcy))
         else:
-            self._auto_face_frames = max(0, self._auto_face_frames - 2)
+            # 얼굴 사라지면 즉시 0 (서서히 줄이지 않음 — 처음부터 다시)
+            self._auto_face_frames = 0
             # 손님 없을 때 30초마다 끌어들이는 음성 (무료 강조)
             if not hasattr(self, "_auto_last_call_time"):
                 self._auto_last_call_time = time.time()
